@@ -15,11 +15,36 @@ import {
   sanitizeError,
 } from "@/lib/api-helpers";
 
-export const maxDuration = 120;
+export const maxDuration = 60;
+
+const BATTLE_WIRE_TIMEOUT_MS = 42_000;
+const BATTLE_POLL_INTERVAL_MS = 1_500;
+const BATTLE_GROQ_TIMEOUT_MS = 14_000;
+
+function positiveNumberEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function battleWireOptions() {
+  return {
+    allowAllFailed: true,
+    timeoutMs: positiveNumberEnv("BATTLE_WIRE_TIMEOUT_MS", BATTLE_WIRE_TIMEOUT_MS),
+    pollIntervalMs: positiveNumberEnv("BATTLE_POLL_INTERVAL_MS", BATTLE_POLL_INTERVAL_MS),
+  };
+}
 
 function demoReportFor(company) {
   const normalized = company.toLowerCase();
   return Object.values(DEMO_REPORTS).find((report) => report.company.toLowerCase() === normalized) ?? null;
+}
+
+function missingEnvKeys() {
+  return ["ANAKIN_API_KEY", "GROQ_API_KEY"].filter((name) => !process.env[name]?.trim());
+}
+
+function deploymentConfigError(keys) {
+  return `Battle Mode is not configured on this deployment. Add ${keys.join(" and ")} in Vercel, then redeploy.`;
 }
 
 export async function POST(req) {
@@ -31,29 +56,34 @@ export async function POST(req) {
 
     const domA = domain_a || guessDomain(company_a);
     const domB = domain_b || guessDomain(company_b);
+    const wireOptions = battleWireOptions();
+    const missingKeys = missingEnvKeys();
 
     // ── [FIX INT-04] GT_COMPARE fired once outside wireAll ────────
     // Company A (5 calls) + Company B (5 calls) + shared GT_COMPARE (1) = 11 ✓
-    const [rawA, rawB, compareTrends] = await Promise.all([
+    const [rawA, rawB, compareTrendsResult] = await Promise.all([
       wireAll({
         reddit:      [ACTIONS.REDDIT_SEARCH, { query: company_a, sort: "top", time: "month", limit: 10 }],
         tp_details:  [ACTIONS.TP_DETAILS,    { domain: domA }],
         tp_reviews:  [ACTIONS.TP_REVIEWS,    { domain: domA, page: 1 }],
         tc_articles: [ACTIONS.TC_TAGS,       { tag: company_a, limit: 8 }],
         ph:          [ACTIONS.PH_PRODUCT,    { slug: guessSlug(company_a) }],
-      }),
+      }, wireOptions),
       wireAll({
         reddit:      [ACTIONS.REDDIT_SEARCH, { query: company_b, sort: "top", time: "month", limit: 10 }],
         tp_details:  [ACTIONS.TP_DETAILS,    { domain: domB }],
         tp_reviews:  [ACTIONS.TP_REVIEWS,    { domain: domB, page: 1 }],
         tc_articles: [ACTIONS.TC_TAGS,       { tag: company_b, limit: 8 }],
         ph:          [ACTIONS.PH_PRODUCT,    { slug: guessSlug(company_b) }],
-      }),
+      }, wireOptions),
       wire(ACTIONS.GT_COMPARE, {
         keywords: `${company_a},${company_b}`,
         timeframe: "today 12-m",
-      }).catch(() => null),  // don't fail the whole request if trends fails
+      }, wireOptions)
+        .then((result) => ({ result, diagnostics: { ok: true } }))
+        .catch((err) => ({ result: null, diagnostics: { ok: false, error: err?.message || "Google Trends compare failed" } })),
     ]);
+    const compareTrends = compareTrendsResult.result;
 
     const normalize = ({ data }) => ({
       reddit:      { posts: data.reddit?.posts ?? data.reddit?.data?.children?.map(c => c.data) ?? [] },
@@ -70,6 +100,15 @@ export async function POST(req) {
     const demoA = demoReportFor(company_a);
     const demoB = demoReportFor(company_b);
     const fallbackSources = [];
+
+    if (
+      liveQualityA === 0 &&
+      liveQualityB === 0 &&
+      missingKeys.includes("ANAKIN_API_KEY") &&
+      !(demoA && demoB)
+    ) {
+      return Response.json({ error: deploymentConfigError(["ANAKIN_API_KEY"]) }, { status: 503 });
+    }
 
     if (liveQualityA === 0 && demoA) {
       Object.assign(dataA, reportToComparisonData(demoA));
@@ -97,15 +136,34 @@ export async function POST(req) {
 
     // ── Groq Battle Mode ──────────────────────────────────────────
     const useDeterministicFallback = liveQualityA === 0 && liveQualityB === 0 && demoA && demoB;
-    let battle = useDeterministicFallback
-      ? buildFallbackBattle(company_a, company_b, demoA, demoB)
-      : await groqCall(
+
+    if (!useDeterministicFallback && missingKeys.includes("GROQ_API_KEY")) {
+      return Response.json({ error: deploymentConfigError(["GROQ_API_KEY"]) }, { status: 503 });
+    }
+
+    let battle;
+    if (useDeterministicFallback) {
+      battle = buildFallbackBattle(company_a, company_b, demoA, demoB, {
+        fallback_reason: "Live Battle Mode services were unavailable, so cached demo intelligence was used.",
+      });
+    } else {
+      try {
+        battle = await groqCall(
           COMPARE_SYSTEM_PROMPT,
           buildComparePrompt(company_a, company_b, dataA, dataB) + dataGapNote,
           3500,
           "llama-3.3-70b-versatile",
-          0.1
+          0.1,
+          { timeoutMs: positiveNumberEnv("BATTLE_GROQ_TIMEOUT_MS", BATTLE_GROQ_TIMEOUT_MS) }
         );
+      } catch (err) {
+        if (!demoA || !demoB) throw err;
+        fallbackSources.push("groq_demo_fallback");
+        battle = buildFallbackBattle(company_a, company_b, demoA, demoB, {
+          fallback_reason: "Groq comparison failed, so cached demo intelligence was used.",
+        });
+      }
+    }
 
     battle = normalizeBattleReport(battle, company_a, company_b);
 
@@ -123,10 +181,11 @@ export async function POST(req) {
       live_quality_b:   liveQualityB,
       data_source:      fallbackSources.length ? "demo_fallback" : "live_wire",
       fallback_sources: fallbackSources,
+      missing_config:   missingKeys,
       wire_diagnostics: {
         company_a: rawA.diagnostics,
         company_b: rawB.diagnostics,
-        compare_trends: compareTrends ? { ok: true } : { ok: false },
+        compare_trends: compareTrendsResult.diagnostics,
       },
       ai_model:         "groq/llama-3.3-70b-versatile",
     };

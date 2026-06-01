@@ -4,6 +4,7 @@ import test from "node:test";
 import { guessDomain, guessSlug } from "../lib/domain.mjs";
 import { extractLargestJSON } from "../lib/json.mjs";
 import { countComparisonQuality, shouldRejectComparisonForNoData } from "../lib/quality.mjs";
+import { wireAll } from "../lib/wire.js";
 
 test("guessDomain applies known non-.com overrides", () => {
   assert.equal(guessDomain("Notion"), "notion.so");
@@ -35,4 +36,39 @@ test("comparison quality gate rejects only when both companies have no evidence"
   assert.equal(countComparisonQuality(withReddit), 1);
   assert.equal(shouldRejectComparisonForNoData(empty, empty), true);
   assert.equal(shouldRejectComparisonForNoData(empty, withReddit), false);
+});
+
+test("wireAll can return diagnostics when every action fails", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.ANAKIN_API_KEY;
+
+  process.env.ANAKIN_API_KEY = "test-key";
+  globalThis.fetch = async () => ({
+    ok: true,
+    text: async () => JSON.stringify({ status: "failed", error: "upstream unavailable" }),
+  });
+
+  try {
+    const result = await wireAll({
+      reddit: ["rt_search", { query: "Acme" }],
+      trustpilot: ["tp_company_details", { domain: "acme.com" }],
+    }, { allowAllFailed: true });
+
+    assert.deepEqual(result.data, { reddit: null, trustpilot: null });
+    assert.equal(result.diagnostics._summary.ok, 0);
+    assert.equal(result.diagnostics._summary.failed, 2);
+    assert.equal(result.diagnostics.reddit.ok, false);
+
+    await assert.rejects(
+      () => wireAll({ reddit: ["rt_search", { query: "Acme" }] }),
+      /Wire failed for all 1 requested actions/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.ANAKIN_API_KEY;
+    } else {
+      process.env.ANAKIN_API_KEY = originalApiKey;
+    }
+  }
 });
