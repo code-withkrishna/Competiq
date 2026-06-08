@@ -152,7 +152,7 @@ export async function POST(req) {
           COMPARE_SYSTEM_PROMPT,
           buildComparePrompt(company_a, company_b, dataA, dataB) + dataGapNote,
           3500,
-          "llama-3.3-70b-versatile",
+          process.env.GROQ_MODEL_NAME || "llama-3.3-70b-versatile",
           0.1,
           { timeoutMs: positiveNumberEnv("BATTLE_GROQ_TIMEOUT_MS", BATTLE_GROQ_TIMEOUT_MS) }
         );
@@ -187,7 +187,7 @@ export async function POST(req) {
         company_b: rawB.diagnostics,
         compare_trends: compareTrendsResult.diagnostics,
       },
-      ai_model:         "groq/llama-3.3-70b-versatile",
+      ai_model:         `groq/${process.env.GROQ_MODEL_NAME || "llama-3.3-70b-versatile"}`,
     };
 
     return Response.json({ success: true, battle, company_a, company_b });

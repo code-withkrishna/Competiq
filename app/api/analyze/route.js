@@ -70,7 +70,9 @@ export async function POST(req) {
     const missingFields = REQUIRED_FIELDS.filter(f => !(f in draftReport));
     if (missingFields.length > 0) {
       console.warn("[analyze] Missing fields from DraftAgent:", missingFields);
-      draftReport._incomplete = missingFields;
+      return Response.json({
+        error: `Intelligence report generation failed. Missing critical fields: ${missingFields.join(", ")}`
+      }, { status: 500 });
     }
 
     // ── STEP 5: Build final report ────────────────────────────────
@@ -104,7 +106,7 @@ export async function POST(req) {
           text:   (r.text ?? r.body ?? "").slice(0, 200),
           rating: r.rating ?? r.stars ?? null,
         })),
-        ai_model:           "groq/llama-3.3-70b-versatile",
+        ai_model:           `groq/${process.env.GROQ_MODEL_NAME || "llama-3.3-70b-versatile"}`,
         // Wire timing for "Why Wire?" panel
         wire_timing_note:   "7 parallel Wire jobs executed in ~18s vs ~120s sequential",
       },
