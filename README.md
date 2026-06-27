@@ -129,13 +129,23 @@ Enter two company names and hit "⚔ Battle →" — 11 parallel Wire calls, hea
 
 ## Quick Start
 
+### Prerequisites
+
+- **Node.js 18.18+** (check with `node -v`; use `nvm use 18` if you have nvm)
+- **Anakin Wire API key** — get yours at [anakin.io/dashboard](https://anakin.io/dashboard)
+- **Groq API key (free)** — get yours at [console.groq.com](https://console.groq.com)
+
+### Setup
+
 ```bash
-# 1. Install
+# 1. Clone and install
+git clone https://github.com/code-withkrishna/Competiq.git
+cd Competiq
 npm install
 
-# 2. Add API keys
-echo "ANAKIN_API_KEY=ask_xxx" >> .env.local
-echo "GROQ_API_KEY=gsk_xxx" >> .env.local
+# 2. Configure environment
+cp .env.example .env.local
+# Open .env.local and fill in your ANAKIN_API_KEY and GROQ_API_KEY
 
 # 3. Run
 npm run dev
@@ -144,6 +154,23 @@ npm run dev
 Open → **http://localhost:3000**
 
 Click any instant demo chip for a zero-wait preview. No API keys needed for demo data.
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env.local` and fill in the required values:
+
+| Variable | Required | Description |
+|---|---|---|
+| `ANAKIN_API_KEY` | ✅ Yes | Wire API key from anakin.io/dashboard |
+| `GROQ_API_KEY` | ✅ Yes | Groq API key from console.groq.com (free tier works) |
+| `GROQ_MODEL_NAME` | No | Defaults to `llama-3.3-70b-versatile` |
+| `ANAKIN_WIRE_BASE_URL` | No | Defaults to `https://api.anakin.io/v1/wire` |
+| `BATTLE_WIRE_TIMEOUT_MS` | No | Defaults to `42000` (42s) |
+| `BATTLE_POLL_INTERVAL_MS` | No | Defaults to `1500` (1.5s) |
+| `BATTLE_GROQ_TIMEOUT_MS` | No | Defaults to `14000` (14s) |
+| `WIRE_TEST_TOKEN` | No | Enables the `/api/wire-test` diagnostic endpoint |
 
 ---
 
@@ -172,6 +199,8 @@ Click any instant demo chip for a zero-wait preview. No API keys needed for demo
 | Wire jobs per battle | 11 parallel |
 | Typical response time | 45–75 seconds |
 | AI agent passes | 2 (draft + critic) |
+| Groq DraftAgent timeout | 35s (with 2× retry on 429) |
+| Groq CriticAgent timeout | 20s (with 2× retry on 429) |
 | Response cache TTL | 5 minutes |
 | Demo data load time | Instant |
 
@@ -180,15 +209,56 @@ Click any instant demo chip for a zero-wait preview. No API keys needed for demo
 ## Deploy
 
 ```bash
+# Deploy to Vercel
 npx vercel --prod
-# Add ANAKIN_API_KEY + GROQ_API_KEY in Vercel dashboard
 ```
+
+In the Vercel dashboard → Project Settings → Environment Variables, add:
+- `ANAKIN_API_KEY`
+- `GROQ_API_KEY`
+
+Then redeploy. Vercel will pick up the new env vars automatically.
+
+### Health Check
+
+After deploying, verify the app is configured correctly:
+
+```
+GET https://your-deployment.vercel.app/api/health
+```
+
+Returns `{ "status": "ok" }` when both API keys are set, or `{ "status": "degraded" }` with details about what's missing.
+
+---
+
+## Troubleshooting
+
+**"Wire API key missing" error**
+→ Your `ANAKIN_API_KEY` is not set. Check your `.env.local` (local) or Vercel environment variables (production).
+
+**"Intelligence service is temporarily busy" error**
+→ Groq free tier rate limit hit. The app automatically retries up to 2× with backoff. If it persists, wait 60 seconds and retry, or upgrade to Groq's paid tier.
+
+**"Data sources are temporarily unavailable" error**
+→ Anakin Wire is timing out. All 7 Wire calls have a 95s timeout. Usually resolves by retrying. If persistent, check [status.anakin.io](https://anakin.io).
+
+**Battle Mode returns demo data instead of live data**
+→ Both companies fell back to cached demo data because Wire returned empty results. Try well-known company names like "Notion", "Linear", or "Figma".
+
+**`npm test` shows MODULE_TYPELESS_PACKAGE_JSON warning**
+→ Already fixed in this version. `"type": "module"` is set in `package.json`.
 
 ---
 
 ## Pitch Framing
 
 > "Think of it as having a junior analyst who pulls data from 7 sources simultaneously — that's Wire. Then a senior analyst who writes the first draft — that's DraftAgent. Then a skeptical editor who fact-checks every claim — that's CriticAgent. You get the result in 60 seconds. Manually, it's 3 hours."
+
+---
+
+## License
+
+MIT — see [LICENSE](./LICENSE)
 
 ---
 
